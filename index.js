@@ -16,9 +16,10 @@ const { handleOwnerCommands } = require('./lib/owner');
 
 const genAI = new GoogleGenerativeAI(config.GEMINI_API_KEY);
 
-mongoose.connect(config.MONGODB_URI)
+// MongoDB Connect Logic
+mongoose.connect(config.MONGODB_URI, { serverSelectionTimeoutMS: 5000 })
     .then(() => console.log('✅ MongoDB Database Connected!'))
-    .catch((err) => console.error('❌ Database Connection Error:', err));
+    .catch((err) => console.log('⚠️ Database Connection Warning (Bypassed):', err.message));
 
 function runtime(seconds) {
     seconds = Number(seconds);
@@ -26,11 +27,7 @@ function runtime(seconds) {
     var h = Math.floor((seconds % (3600 * 24)) / 3600);
     var m = Math.floor((seconds % 3600) / 60);
     var s = Math.floor(seconds % 60);
-    var dDisplay = d > 0 ? d + (d == 1 ? " day, " : " days, ") : "";
-    var hDisplay = h > 0 ? h + (h == 1 ? " hour, " : " hours, ") : "";
-    var mDisplay = m > 0 ? m + (m == 1 ? " minute, " : " minutes, ") : "";
-    var sDisplay = s > 0 ? s + (s == 1 ? " second" : " seconds") : "";
-    return dDisplay + hDisplay + mDisplay + sDisplay;
+    return (d > 0 ? d + "d " : "") + (h > 0 ? h + "h " : "") + (m > 0 ? m + "m " : "") + s + "s";
 }
 
 async function getGeminiReply(userPrompt, senderName) {
@@ -44,12 +41,13 @@ async function getGeminiReply(userPrompt, senderName) {
     }
 }
 
+// Voice Note Sender Function (Fixed for Playback)
 async function sendVoiceNote(sock, jid, audioPath, quotedMsg) {
     if (fs.existsSync(audioPath)) {
         await sock.sendMessage(jid, {
             audio: fs.readFileSync(audioPath),
-            mimetype: 'audio/mp4',
-            ptt: true
+            mimetype: 'audio/mpeg',
+            ptt: false
         }, { quoted: quotedMsg });
     }
 }
@@ -61,12 +59,11 @@ async function startSaraBot() {
     const sock = makeWASocket({
         version,
         auth: state,
-        printQRInTerminal: false, // QR code අක්‍රිය කර ඇත
+        printQRInTerminal: false,
         logger: pino({ level: 'silent' }),
         browser: ['Ubuntu', 'Chrome', '20.0.04']
     });
 
-    // Pairing Code Request System
     if (!sock.authState.creds.registered) {
         let phoneNumber = config.OWNER_NUMBER.replace(/[^0-9]/g, '');
         setTimeout(async () => {
@@ -102,9 +99,10 @@ async function startSaraBot() {
             const senderName = msg.pushName || 'Bro';
             const senderNumber = msg.key.participant || msg.key.remoteJid;
 
-            // Voice Triggers
-            if (config.VOICES.commands[lowerText]) return await sendVoiceNote(sock, jid, config.VOICES.commands[lowerText], msg);
-            if (config.VOICES.keywords[lowerText]) return await sendVoiceNote(sock, jid, config.VOICES.keywords[lowerText], msg);
+            // Simple Keyword Voice Triggers (hi, gm, mk, gn)
+            if (config.VOICES.keywords[lowerText]) {
+                return await sendVoiceNote(sock, jid, config.VOICES.keywords[lowerText], msg);
+            }
 
             // Command Processing
             if (text.startsWith(config.PREFIX)) {
@@ -129,8 +127,10 @@ async function startSaraBot() {
 
                 // .menu Command
                 if (command === 'menu') {
+                    // 1. Send Voice
                     await sendVoiceNote(sock, jid, config.VOICES.commands['.menu'], msg);
 
+                    // 2. Send Text Menu
                     const menuMsg = `╭━━━〔 🤖 *${config.BOT_NAME}* 〕━━━╮
 │
 │ 👤 *User:* ${senderName}
@@ -154,7 +154,6 @@ async function startSaraBot() {
 ╭━━━〔 📥 *DOWNLOAD COMMANDS* 〕━━━╮
 │ .song <නම/link>
 │ .video <නම/link>
-│ .play <නම>
 │ .tiktok <link>
 │ .fb <link>
 │ .ig <link>
@@ -176,16 +175,11 @@ async function startSaraBot() {
                 if (command === 'alive') {
                     await sendVoiceNote(sock, jid, config.VOICES.commands['.alive'], msg);
 
-                    const startTime = Date.now();
-                    const ping = Date.now() - startTime;
-
                     const aliveMsg = `👋 *Hey ${senderName}! I'm Alive and Active!* 🌸
 
 🤖 *Bot Name:* ${config.BOT_NAME}
 👑 *Owner:* ${config.OWNER_NAME}
-⚡ *Speed / Ping:* ${ping}ms
 ⏱️ *Uptime:* ${runtime(process.uptime())}
-🗄️ *Database:* Connected ✅
 🧠 *AI Mode:* Gemini 1.5 Flash Active
 
 _Type *${config.PREFIX}menu* to see all available commands!_`;
@@ -202,26 +196,20 @@ _Type *${config.PREFIX}menu* to see all available commands!_`;
 🌐 *GitHub:* https://github.com
 💻 *Project:* Sara Multi-Device Bot`;
 
-                    const vcard = 'BEGIN:VCARD\n'
-                        + 'VERSION:3.0\n' 
-                        + `FN:${config.OWNER_NAME}\n` 
-                        + `ORG:Sara MD Owner;\n` 
-                        + `TEL;type=CELL;type=VOICE;waid=${config.OWNER_NUMBER}:+${config.OWNER_NUMBER}\n` 
-                        + 'END:VCARD';
-
-                    await sock.sendMessage(jid, { contacts: { displayName: config.OWNER_NAME, contacts: [{ vcard }] } }, { quoted: msg });
                     return await sock.sendMessage(jid, { text: ownerMsg }, { quoted: msg });
                 }
 
-                // Module Router
+                // Downloader Router
                 if (['song', 'video', 'play', 'audio', 'tiktok', 'fb', 'ig'].includes(command)) {
                     return await handleDownloadCommands(sock, jid, msg, command, query);
                 }
 
+                // Group Router
                 if (isGroup && ['tagall', 'hidetag', 'admins', 'open', 'close', 'kick', 'promote', 'demote'].includes(command)) {
                     return await handleGroupCommands(sock, jid, msg, command, args, groupMetadata, isAdmins, isBotAdmins);
                 }
 
+                // Owner Router
                 if (['restart', 'broadcast', 'eval'].includes(command)) {
                     return await handleOwnerCommands(sock, jid, msg, command, args, isOwner);
                 }

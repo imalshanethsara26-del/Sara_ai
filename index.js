@@ -7,8 +7,13 @@ const {
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const mongoose = require('mongoose');
 const fs = require('fs');
+const path = require('path');
 const pino = require('pino');
+const ffmpeg = require('fluent-ffmpeg');
+const ffmpegPath = require('ffmpeg-static');
 const config = require('./config');
+
+ffmpeg.setFfmpegPath(ffmpegPath);
 
 const { handleDownloadCommands } = require('./lib/downloader');
 const { handleGroupCommands } = require('./lib/group');
@@ -16,10 +21,9 @@ const { handleOwnerCommands } = require('./lib/owner');
 
 const genAI = new GoogleGenerativeAI(config.GEMINI_API_KEY);
 
-// MongoDB Connect Logic
 mongoose.connect(config.MONGODB_URI, { serverSelectionTimeoutMS: 5000 })
     .then(() => console.log('✅ MongoDB Database Connected!'))
-    .catch((err) => console.log('⚠️ Database Connection Warning (Bypassed):', err.message));
+    .catch((err) => console.log('⚠️ Database Connection Warning:', err.message));
 
 function runtime(seconds) {
     seconds = Number(seconds);
@@ -30,26 +34,45 @@ function runtime(seconds) {
     return (d > 0 ? d + "d " : "") + (h > 0 ? h + "h " : "") + (m > 0 ? m + "m " : "") + s + "s";
 }
 
+// Gemini AI Reply Generator
 async function getGeminiReply(userPrompt, senderName) {
     try {
         const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
-        const systemPrompt = `You are Sara, a friendly and witty Sri Lankan WhatsApp AI bot. User: ${senderName}. Reply naturally in casual Sinhala/Singlish. Keep it short.`;
+        const systemPrompt = `You are Sara, a friendly Sri Lankan WhatsApp AI bot. User's name is ${senderName}. Reply in friendly Sinhala/Singlish. Keep responses under 3 lines.`;
         const result = await model.generateContent([systemPrompt, userPrompt]);
         return result.response.text();
     } catch (e) {
+        console.error('Gemini API Error:', e.message);
         return null;
     }
 }
 
-// Voice Note Sender Function (Fixed for Playback)
+// True WhatsApp Voice Note (PTT) Converter & Sender
 async function sendVoiceNote(sock, jid, audioPath, quotedMsg) {
-    if (fs.existsSync(audioPath)) {
-        await sock.sendMessage(jid, {
-            audio: fs.readFileSync(audioPath),
-            mimetype: 'audio/mpeg',
-            ptt: false
-        }, { quoted: quotedMsg });
-    }
+    if (!fs.existsSync(audioPath)) return;
+
+    const outputPath = path.join(__dirname, `temp_${Date.now()}.opus`);
+
+    ffmpeg(audioPath)
+        .toFormat('ogg')
+        .audioCodec('libopus')
+        .on('end', async () => {
+            try {
+                await sock.sendMessage(jid, {
+                    audio: fs.readFileSync(outputPath),
+                    mimetype: 'audio/ogg; codecs=opus',
+                    ptt: true // WhatsApp Real Voice Note
+                }, { quoted: quotedMsg });
+
+                if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
+            } catch (err) {
+                console.error('Error sending Voice Note:', err);
+            }
+        })
+        .on('error', (err) => {
+            console.error('FFmpeg Conversion Error:', err);
+        })
+        .save(outputPath);
 }
 
 async function startSaraBot() {
@@ -99,7 +122,7 @@ async function startSaraBot() {
             const senderName = msg.pushName || 'Bro';
             const senderNumber = msg.key.participant || msg.key.remoteJid;
 
-            // Simple Keyword Voice Triggers (hi, gm, mk, gn)
+            // Voice Note Keywords (hi, gm, mk, gn)
             if (config.VOICES.keywords[lowerText]) {
                 return await sendVoiceNote(sock, jid, config.VOICES.keywords[lowerText], msg);
             }
@@ -125,12 +148,10 @@ async function startSaraBot() {
                     isBotAdmins = !!participants.find(p => p.id === botNumber && p.admin);
                 }
 
-                // .menu Command
+                // .menu
                 if (command === 'menu') {
-                    // 1. Send Voice
                     await sendVoiceNote(sock, jid, config.VOICES.commands['.menu'], msg);
 
-                    // 2. Send Text Menu
                     const menuMsg = `╭━━━〔 🤖 *${config.BOT_NAME}* 〕━━━╮
 │
 │ 👤 *User:* ${senderName}
@@ -171,7 +192,7 @@ async function startSaraBot() {
                     return await sock.sendMessage(jid, { text: menuMsg }, { quoted: msg });
                 }
 
-                // .alive Command
+                // .alive
                 if (command === 'alive') {
                     await sendVoiceNote(sock, jid, config.VOICES.commands['.alive'], msg);
 
@@ -187,7 +208,7 @@ _Type *${config.PREFIX}menu* to see all available commands!_`;
                     return await sock.sendMessage(jid, { text: aliveMsg }, { quoted: msg });
                 }
 
-                // .owner Command
+                // .owner
                 if (command === 'owner') {
                     const ownerMsg = `👑 *SARA MD BOT OWNER INFO*
 
@@ -199,23 +220,21 @@ _Type *${config.PREFIX}menu* to see all available commands!_`;
                     return await sock.sendMessage(jid, { text: ownerMsg }, { quoted: msg });
                 }
 
-                // Downloader Router
+                // Routers
                 if (['song', 'video', 'play', 'audio', 'tiktok', 'fb', 'ig'].includes(command)) {
                     return await handleDownloadCommands(sock, jid, msg, command, query);
                 }
 
-                // Group Router
                 if (isGroup && ['tagall', 'hidetag', 'admins', 'open', 'close', 'kick', 'promote', 'demote'].includes(command)) {
                     return await handleGroupCommands(sock, jid, msg, command, args, groupMetadata, isAdmins, isBotAdmins);
                 }
 
-                // Owner Router
                 if (['restart', 'broadcast', 'eval'].includes(command)) {
                     return await handleOwnerCommands(sock, jid, msg, command, args, isOwner);
                 }
             }
 
-            // Gemini AI Auto Reply
+            // Gemini AI Auto Reply (Private Chats)
             if (text && !isGroup) {
                 const aiReply = await getGeminiReply(text, senderName);
                 if (aiReply) await sock.sendMessage(jid, { text: aiReply }, { quoted: msg });

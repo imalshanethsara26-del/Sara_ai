@@ -76,8 +76,14 @@ async function sendVoiceNote(sock, jid, audioPath, quotedMsg) {
 }
 
 async function startSaraBot() {
-    // GitHub එකෙන් clone වෙන session folder එක හරහා creds.json එක Read කරයි
-    const { state, saveCreds } = await useMultiFileAuthState('./session');
+    const sessionDir = './session';
+    
+    // වැරදුණු creds.json නිසා error දෙනවා නම් එය clear කර ගැනීමට safe check එකක්
+    if (!fs.existsSync(sessionDir)) {
+        fs.mkdirSync(sessionDir, { recursive: true });
+    }
+
+    const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
     const { version } = await fetchLatestBaileysVersion();
 
     const sock = makeWASocket({
@@ -88,16 +94,20 @@ async function startSaraBot() {
         browser: ['Ubuntu', 'Chrome', '20.0.04']
     });
 
-    // creds.json එක ඇතුළේ valid session එකක් තිබේ නම් pairing code ඉල්ලීම bypass වේ
+    // Pairing Code Request System (creds.json නොමැති නම් හෝ invalid නම්)
     if (!sock.authState.creds.registered) {
         let phoneNumber = config.OWNER_NUMBER.replace(/[^0-9]/g, '');
         setTimeout(async () => {
-            let code = await sock.requestPairingCode(phoneNumber);
-            code = code?.match(/.{1,4}/g)?.join("-") || code;
-            console.log(`\n===========================================`);
-            console.log(`📱 SARA MD PAIRING CODE: ${code}`);
-            console.log(`===========================================\n`);
-        }, 3000);
+            try {
+                let code = await sock.requestPairingCode(phoneNumber);
+                code = code?.match(/.{1,4}/g)?.join("-") || code;
+                console.log(`\n===========================================`);
+                console.log(`📱 SARA MD PAIRING CODE: ${code}`);
+                console.log(`===========================================\n`);
+            } catch (err) {
+                console.error('Error getting pairing code:', err);
+            }
+        }, 4000);
     }
 
     sock.ev.on('creds.update', saveCreds);
@@ -110,28 +120,30 @@ async function startSaraBot() {
                 console.log('🔄 Reconnecting Sara Bot...');
                 startSaraBot();
             } else {
-                console.log('❌ Connection Closed. Logged out.');
+                console.log('❌ Connection Closed. Logged out. Please restart.');
             }
         } else if (connection === 'open') {
-            console.log('🚀 Sara MD Bot Active & Ready using creds.json from GitHub session folder!');
+            console.log('🚀 Sara MD Bot Active & Ready!');
         }
     });
 
-    sock.ev.on('messages.upsert', async ({ messages }) => {
+    sock.ev.on('messages.upsert', async (chatUpdate) => {
         try {
-            const msg = messages[0];
-            if (!msg.message || msg.key.fromMe) return;
+            const mek = chatUpdate.messages[0];
+            if (!mek.message) return;
 
-            const jid = msg.key.remoteJid;
+            if (mek.key.fromMe) return;
+
+            const jid = mek.key.remoteJid;
             const isGroup = jid.endsWith('@g.us');
-            const text = (msg.message.conversation || msg.message.extendedTextMessage?.text || '').trim();
+            const text = (mek.message.conversation || mek.message.extendedTextMessage?.text || '').trim();
             const lowerText = text.toLowerCase();
-            const senderName = msg.pushName || 'Bro';
-            const senderNumber = msg.key.participant || msg.key.remoteJid;
+            const senderName = mek.pushName || 'Bro';
+            const senderNumber = mek.key.participant || mek.key.remoteJid;
 
             // Voice Note Keywords
             if (config.VOICES.keywords[lowerText]) {
-                return await sendVoiceNote(sock, jid, config.VOICES.keywords[lowerText], msg);
+                return await sendVoiceNote(sock, jid, config.VOICES.keywords[lowerText], mek);
             }
 
             // Command Processing
@@ -157,7 +169,7 @@ async function startSaraBot() {
 
                 // .menu
                 if (command === 'menu') {
-                    await sendVoiceNote(sock, jid, config.VOICES.commands['.menu'], msg);
+                    await sendVoiceNote(sock, jid, config.VOICES.commands['.menu'], mek);
 
                     const menuMsg = `╭━━━〔 🤖 *${config.BOT_NAME}* 〕━━━╮
 │
@@ -196,12 +208,12 @@ async function startSaraBot() {
 
 > *Powered by Sara MD Engine* ⚡`;
 
-                    return await sock.sendMessage(jid, { text: menuMsg }, { quoted: msg });
+                    return await sock.sendMessage(jid, { text: menuMsg }, { quoted: mek });
                 }
 
                 // .alive
                 if (command === 'alive') {
-                    await sendVoiceNote(sock, jid, config.VOICES.commands['.alive'], msg);
+                    await sendVoiceNote(sock, jid, config.VOICES.commands['.alive'], mek);
 
                     const aliveMsg = `👋 *Hey ${senderName}! I'm Alive and Active!* 🌸
 
@@ -212,7 +224,7 @@ async function startSaraBot() {
 
 _Type *${config.PREFIX}menu* to see all available commands!_`;
 
-                    return await sock.sendMessage(jid, { text: aliveMsg }, { quoted: msg });
+                    return await sock.sendMessage(jid, { text: aliveMsg }, { quoted: mek });
                 }
 
                 // .owner
@@ -224,31 +236,31 @@ _Type *${config.PREFIX}menu* to see all available commands!_`;
 🌐 *GitHub:* https://github.com
 💻 *Project:* Sara Multi-Device Bot`;
 
-                    return await sock.sendMessage(jid, { text: ownerMsg }, { quoted: msg });
+                    return await sock.sendMessage(jid, { text: ownerMsg }, { quoted: mek });
                 }
 
                 // Routers
                 if (['song', 'video', 'play', 'audio', 'tiktok', 'fb', 'ig'].includes(command)) {
-                    return await handleDownloadCommands(sock, jid, msg, command, query);
+                    return await handleDownloadCommands(sock, jid, mek, command, query);
                 }
 
                 if (isGroup && ['tagall', 'hidetag', 'admins', 'open', 'close', 'kick', 'promote', 'demote'].includes(command)) {
-                    return await handleGroupCommands(sock, jid, msg, command, args, groupMetadata, isAdmins, isBotAdmins);
+                    return await handleGroupCommands(sock, jid, mek, command, args, groupMetadata, isAdmins, isBotAdmins);
                 }
 
                 if (['restart', 'broadcast', 'eval'].includes(command)) {
-                    return await handleOwnerCommands(sock, jid, msg, command, args, isOwner);
+                    return await handleOwnerCommands(sock, jid, mek, command, args, isOwner);
                 }
             }
 
             // Gemini AI Auto Reply (Private Chats)
             if (text && !isGroup) {
                 const aiReply = await getGeminiReply(text, senderName);
-                if (aiReply) await sock.sendMessage(jid, { text: aiReply }, { quoted: msg });
+                if (aiReply) await sock.sendMessage(jid, { text: aiReply }, { quoted: mek });
             }
 
         } catch (error) {
-            console.error('Error:', error);
+            console.error('Messages Upsert Error:', error);
         }
     });
 }

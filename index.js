@@ -61,7 +61,7 @@ async function sendVoiceNote(sock, jid, audioPath, quotedMsg) {
                 await sock.sendMessage(jid, {
                     audio: fs.readFileSync(outputPath),
                     mimetype: 'audio/ogg; codecs=opus',
-                    ptt: true // WhatsApp Real Voice Note
+                    ptt: true
                 }, { quoted: quotedMsg });
 
                 if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
@@ -76,6 +76,7 @@ async function sendVoiceNote(sock, jid, audioPath, quotedMsg) {
 }
 
 async function startSaraBot() {
+    // GitHub එකෙන් clone වෙන session folder එක හරහා creds.json එක Read කරයි
     const { state, saveCreds } = await useMultiFileAuthState('./session');
     const { version } = await fetchLatestBaileysVersion();
 
@@ -87,6 +88,7 @@ async function startSaraBot() {
         browser: ['Ubuntu', 'Chrome', '20.0.04']
     });
 
+    // creds.json එක ඇතුළේ valid session එකක් තිබේ නම් pairing code ඉල්ලීම bypass වේ
     if (!sock.authState.creds.registered) {
         let phoneNumber = config.OWNER_NUMBER.replace(/[^0-9]/g, '');
         setTimeout(async () => {
@@ -104,9 +106,14 @@ async function startSaraBot() {
         const { connection, lastDisconnect } = update;
         if (connection === 'close') {
             const shouldReconnect = (lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
-            if (shouldReconnect) startSaraBot();
+            if (shouldReconnect) {
+                console.log('🔄 Reconnecting Sara Bot...');
+                startSaraBot();
+            } else {
+                console.log('❌ Connection Closed. Logged out.');
+            }
         } else if (connection === 'open') {
-            console.log('🚀 Sara MD Bot Active & Ready!');
+            console.log('🚀 Sara MD Bot Active & Ready using creds.json from GitHub session folder!');
         }
     });
 
@@ -122,7 +129,7 @@ async function startSaraBot() {
             const senderName = msg.pushName || 'Bro';
             const senderNumber = msg.key.participant || msg.key.remoteJid;
 
-            // Voice Note Keywords (hi, gm, mk, gn)
+            // Voice Note Keywords
             if (config.VOICES.keywords[lowerText]) {
                 return await sendVoiceNote(sock, jid, config.VOICES.keywords[lowerText], msg);
             }
